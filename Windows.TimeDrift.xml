@@ -1,0 +1,491 @@
+﻿<?xml version="1.0" encoding="utf-8"?><ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="2.0" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest>
+    <Identity>
+      <ID>Windows.TimeDrift</ID>
+      <Version>1.0.0.0</Version>
+    </Identity>
+    <Name>Windows.TimeDrift</Name>
+    <References>
+      <Reference Alias="SCDW">
+        <ID>Microsoft.SystemCenter.DataWarehouse.Library</ID>
+        <Version>7.1.10226.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Windows">
+        <ID>Microsoft.Windows.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Performance">
+        <ID>System.Performance.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="System">
+        <ID>System.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="SC">
+        <ID>Microsoft.SystemCenter.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Health">
+        <ID>System.Health.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+    </References>
+  </Manifest>
+  <TypeDefinitions>
+    <ModuleTypes>
+      <DataSourceModuleType ID="Windows.TimeDrift.DS" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element type="xsd:string" name="RefServer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element type="xsd:integer" name="Threshold" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="RefServer" Selector="$Config/RefServer$" ParameterType="string" />
+          <OverrideableParameter ID="Threshold" Selector="$Config/Threshold$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <SimpleReccuringSchedule>
+                    <Interval Unit="Seconds">$Config/IntervalSeconds$</Interval>
+                  </SimpleReccuringSchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="Probe" TypeID="Windows.TimeDrift.PA">
+                <RefServer>$Config/RefServer$</RefServer>
+                <Threshold>$Config/Threshold$</Threshold>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="Probe">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+      <ProbeActionModuleType ID="Windows.TimeDrift.PA" Accessibility="Internal" Batching="false" PassThrough="false">
+        <Configuration>
+          <xsd:element type="xsd:string" name="RefServer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element type="xsd:integer" name="Threshold" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="RefServer" Selector="$Config/RefServer$" ParameterType="string" />
+          <OverrideableParameter ID="Threshold" Selector="$Config/Threshold$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <ProbeAction ID="Probe" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagTriggerOnlyProbe">
+                <ScriptName>Windows.TimeDrift.PA.ps1</ScriptName>
+                <ScriptBody>#=================================================================================
+#  Time Skew Monitoring Script
+#  Kevin Holman
+#  Version 1.0
+#=================================================================================
+param([string]$RefServer,[int]$Threshold)
+
+
+#=================================================================================
+# Constants section - modify stuff here:
+
+# Assign script name variable for use in event logging
+$ScriptName = "Windows.TimeDrift.PA.ps1"
+# Set samples to the number of w32time samples you wish to include 
+[int]$Samples = '1'
+# For testing - assign values instead of paramtersto the script
+#[string]$RefServer = 'dc1.opsmgr.net'
+#[int]$Threshold = '10'
+#=================================================================================
+
+# Gather script start time
+$StartTime = Get-Date             
+
+# Gather who the script is running as
+$WhoAmI = whoami
+
+# Load MomScript API and PropertyBag function 
+$momapi = new-object -comObject 'MOM.ScriptAPI'
+$bag = $momapi.CreatePropertyBag()
+
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,9250,0, "Starting script")
+
+
+#Start MAIN body of script:
+
+#Getting the required data
+$cmd = w32tm /stripchart /computer:$RefServer /dataonly /samples:$Samples
+
+IF ($cmd -match 'error')
+{
+  #Log error and quit
+  $momapi.LogScriptEvent($ScriptName,9250,2, "Getting TimeDrift from Reference Server returned an error .  Reference server is ($RefServer).  Output of command is ($cmd)")
+  exit
+}
+ELSE
+{
+  #Assume we got good results from cmd
+  $Skew = $cmd[-1..($Samples * -1)] | ConvertFrom-Csv -Header "Time","Skew" | Select -ExpandProperty Skew
+  $Result = $Skew | % { $_ -replace "s","" }   | Measure-Object -Average | select -ExpandProperty Average
+}
+
+#The problem is that you can have time skew in two directions: positive or negative. You can do two
+#things: create an IF statement that does check both or just create a positive number.
+IF ($Result -lt 0) { $Result = $Result * -1 }
+
+$TimeDriftSeconds = [math]::Round($Result,2)
+
+#Determine if the average time skew is higher than your threshold and report this back to SCOM.
+IF ($TimeDriftSeconds -gt $Threshold)
+{
+  $bag.AddValue("TimeSkew","True")
+  $momapi.LogScriptEvent($ScriptName,9250,2, "Time Drift was detected.  Reference server is ($RefServer).  Threshold is ($Threshold) seconds.  Value is ($TimeDriftSeconds) seconds")
+}
+ELSE
+{
+  $bag.AddValue("TimeSkew","False")
+  #Log good event for testing
+  #$momapi.LogScriptEvent($ScriptName,9250,0, "Time Drift was OK.  Reference server is ($RefServer).  Threshold is ($Threshold) seconds.  Value is ($TimeDriftSeconds) seconds") 
+}
+
+#Add stuff into the propertybag
+$bag.AddValue("RefServer",$RefServer)
+$bag.AddValue("Threshold",$Threshold)
+$bag.AddValue("TimeDriftSeconds",$TimeDriftSeconds)
+
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$ScriptTime = [math]::Round($ScriptTime,2)
+$momapi.LogScriptEvent($ScriptName,9250,0,"`n Script has completed. `n Reference server is ($RefServer). `n Threshold is ($Threshold) seconds. `n Value is ($TimeDriftSeconds) seconds. `n Runtime was ($ScriptTime) seconds.")
+
+#Output the propertybag  
+$bag
+</ScriptBody>
+                <Parameters>
+                  <Parameter>
+                    <Name>RefServer</Name>
+                    <Value>$Config/RefServer$</Value>
+                  </Parameter>
+                  <Parameter>
+                    <Name>Threshold</Name>
+                    <Value>$Config/Threshold$</Value>
+                  </Parameter>
+                </Parameters>
+                <TimeoutSeconds>60</TimeoutSeconds>
+                <StrictErrorHandling>false</StrictErrorHandling>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="Probe" />
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+        <TriggerOnly>true</TriggerOnly>
+      </ProbeActionModuleType>
+    </ModuleTypes>
+    <MonitorTypes>
+      <UnitMonitorType ID="Windows.TimeDrift.MonitorType" Accessibility="Internal">
+        <MonitorTypeStates>
+          <MonitorTypeState ID="TimeDriftOK" NoDetection="false" />
+          <MonitorTypeState ID="TimeDriftBAD" NoDetection="false" />
+        </MonitorTypeStates>
+        <Configuration>
+          <xsd:element type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element type="xsd:string" name="RefServer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element type="xsd:integer" name="Threshold" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="RefServer" Selector="$Config/RefServer$" ParameterType="string" />
+          <OverrideableParameter ID="Threshold" Selector="$Config/Threshold$" ParameterType="int" />
+        </OverrideableParameters>
+        <MonitorImplementation>
+          <MemberModules>
+            <DataSource ID="DataSource" TypeID="Windows.TimeDrift.DS">
+              <IntervalSeconds>$Config/IntervalSeconds$</IntervalSeconds>
+              <RefServer>$Config/RefServer$</RefServer>
+              <Threshold>$Config/Threshold$</Threshold>
+            </DataSource>
+            <ProbeAction ID="Probe" TypeID="Windows.TimeDrift.PA">
+              <RefServer>$Config/RefServer$</RefServer>
+              <Threshold>$Config/Threshold$</Threshold>
+            </ProbeAction>
+            <ConditionDetection ID="TimeDriftOKFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='TimeSkew']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">False</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+            <ConditionDetection ID="TimeDriftBADFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='TimeSkew']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">True</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+          </MemberModules>
+          <RegularDetections>
+            <RegularDetection MonitorTypeStateID="TimeDriftOK">
+              <Node ID="TimeDriftOKFilter">
+                <Node ID="DataSource" />
+              </Node>
+            </RegularDetection>
+            <RegularDetection MonitorTypeStateID="TimeDriftBAD">
+              <Node ID="TimeDriftBADFilter">
+                <Node ID="DataSource" />
+              </Node>
+            </RegularDetection>
+          </RegularDetections>
+          <OnDemandDetections>
+            <OnDemandDetection MonitorTypeStateID="TimeDriftOK">
+              <Node ID="TimeDriftOKFilter">
+                <Node ID="DataSource" />
+              </Node>
+            </OnDemandDetection>
+            <OnDemandDetection MonitorTypeStateID="TimeDriftBAD">
+              <Node ID="TimeDriftBADFilter">
+                <Node ID="DataSource" />
+              </Node>
+            </OnDemandDetection>
+          </OnDemandDetections>
+        </MonitorImplementation>
+      </UnitMonitorType>
+    </MonitorTypes>
+  </TypeDefinitions>
+  <Monitoring>
+    <Rules>
+      <Rule ID="Windows.TimeDrift.PerfCollection.Rule" Enabled="true" Target="Windows!Microsoft.Windows.Server.OperatingSystem" ConfirmDelivery="false" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>PerformanceCollection</Category>
+        <DataSources>
+          <DataSource ID="DataSource" TypeID="Windows.TimeDrift.DS">
+            <IntervalSeconds>3600</IntervalSeconds>
+            <RefServer>dc1.opsmgr.net</RefServer>
+            <Threshold>200</Threshold>
+          </DataSource>
+        </DataSources>
+        <ConditionDetection ID="System.Performance.DataGenericMapper" TypeID="Performance!System.Performance.DataGenericMapper">
+          <ObjectName>w32time</ObjectName>
+          <CounterName>TimeDrift</CounterName>
+          <InstanceName>_Total</InstanceName>
+          <Value>$Data/Property[@Name='TimeDriftSeconds']$</Value>
+        </ConditionDetection>
+        <WriteActions>
+          <WriteAction ID="Microsoft.SystemCenter.CollectPerformanceData" TypeID="SC!Microsoft.SystemCenter.CollectPerformanceData" />
+          <WriteAction ID="Microsoft.SystemCenter.DataWarehouse.PublishPerformanceData" TypeID="SCDW!Microsoft.SystemCenter.DataWarehouse.PublishPerformanceData" />
+        </WriteActions>
+      </Rule>
+      <Rule ID="Windows.TimeDrift.ScriptError.Rule" Enabled="true" Target="Windows!Microsoft.Windows.Server.OperatingSystem" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">9250</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="Integer">EventLevel</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="Integer">2</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>error</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>1</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="Windows.TimeDrift.ScriptError.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data[Default='']/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue />
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+    </Rules>
+    <Monitors>
+      <UnitMonitor ID="Windows.TimeDrift.Monitor" Accessibility="Public" Enabled="true" Target="Windows!Microsoft.Windows.Server.OperatingSystem" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="Windows.TimeDrift.MonitorType" ConfirmDelivery="false">
+        <Category>PerformanceHealth</Category>
+        <AlertSettings AlertMessage="Windows.TimeDrift.Monitor.Alert.Message">
+          <AlertOnState>Warning</AlertOnState>
+          <AutoResolve>true</AutoResolve>
+          <AlertPriority>High</AlertPriority>
+          <AlertSeverity>Error</AlertSeverity>
+          <AlertParameters>
+            <AlertParameter1>$Data/Context/Property[@Name='RefServer']$</AlertParameter1>
+            <AlertParameter2>$Data/Context/Property[@Name='Threshold']$</AlertParameter2>
+            <AlertParameter3>$Data/Context/Property[@Name='TimeDriftSeconds']$</AlertParameter3>
+          </AlertParameters>
+        </AlertSettings>
+        <OperationalStates>
+          <OperationalState ID="Success" MonitorTypeStateID="TimeDriftOK" HealthState="Success" />
+          <OperationalState ID="Warning" MonitorTypeStateID="TimeDriftBAD" HealthState="Warning" />
+        </OperationalStates>
+        <Configuration>
+          <IntervalSeconds>3600</IntervalSeconds>
+          <RefServer>dc1.opsmgr.net</RefServer>
+          <Threshold>200</Threshold>
+        </Configuration>
+      </UnitMonitor>
+    </Monitors>
+  </Monitoring>
+  <Presentation>
+    <Views>
+      <View ID="Windows.TimeDrift.Performance.View" Accessibility="Public" Enabled="true" Target="Windows!Microsoft.Windows.Server.OperatingSystem" TypeID="SC!Microsoft.SystemCenter.PerformanceViewType" Visible="true">
+        <Category>Operations</Category>
+        <Criteria>
+          <Object>w32time</Object>
+          <Counter>TimeDrift</Counter>
+        </Criteria>
+        <Target />
+      </View>
+      <View ID="Windows.TimeDrift.Alert.View" Accessibility="Public" Enabled="true" Target="Windows!Microsoft.Windows.Server.OperatingSystem" TypeID="SC!Microsoft.SystemCenter.AlertViewType" Visible="true">
+        <Category>Operations</Category>
+        <Criteria>
+          <Name>%Time Drift%</Name>
+        </Criteria>
+        <Target />
+      </View>
+    </Views>
+    <Folders>
+      <Folder ID="Windows.TimeDrift.Root.Folder" Accessibility="Public" ParentFolder="SC!Microsoft.SystemCenter.Monitoring.ViewFolder.Root" />
+    </Folders>
+    <FolderItems>
+      <FolderItem ElementID="Windows.TimeDrift.Performance.View" ID="i27da63418a1b4ee1b684f64b13d748f9" Folder="Windows.TimeDrift.Root.Folder" />
+      <FolderItem ElementID="Windows.TimeDrift.Alert.View" ID="ib82a03e15f714acd8aa1613aa5ff8568" Folder="Windows.TimeDrift.Root.Folder" />
+    </FolderItems>
+    <StringResources>
+      <StringResource ID="Windows.TimeDrift.Monitor.Alert.Message" />
+      <StringResource ID="Windows.TimeDrift.ScriptError.Rule.AlertMessage" />
+    </StringResources>
+  </Presentation>
+  <LanguagePacks>
+    <LanguagePack ID="ENU" IsDefault="true">
+      <DisplayStrings>
+        <DisplayString ElementID="Windows.TimeDrift">
+          <Name>Windows TimeDrift</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.PerfCollection.Rule">
+          <Name>Windows TimeDrift Performance Collection Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Monitor">
+          <Name>Time Drift Detection Monitor</Name>
+          <Description />
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Monitor" SubElementID="Success">
+          <Name>TimeDriftOK</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Monitor" SubElementID="Warning">
+          <Name>TimeDriftBAD</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Monitor.Alert.Message">
+          <Name>Time Drift Detected</Name>
+          <Description>Time Drift was detected.
+
+Reference server:  {0}
+Threshold (seconds):  {1}
+Time drift (seconds):  {2}</Description>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.ScriptError.Rule">
+          <Name>Time Drift Monitoring Script had an Error</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.ScriptError.Rule.AlertMessage">
+          <Name>Time Drift Script Error Rule</Name>
+          <Description>A script error occurred when measuring for Time Drift:
+
+Event Description: {0}</Description>
+        </DisplayString>		
+        <DisplayString ElementID="Windows.TimeDrift.Root.Folder">
+          <Name>Windows Time Drift</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Performance.View">
+          <Name>Performance</Name>
+        </DisplayString>
+        <DisplayString ElementID="Windows.TimeDrift.Alert.View">
+          <Name>Alerts</Name>
+        </DisplayString>
+      </DisplayStrings>
+    </LanguagePack>
+  </LanguagePacks>
+</ManagementPack>
